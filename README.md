@@ -25,8 +25,5 @@ Four plants, one stone, and a handful of rules. The footer gives the hints that 
 - `test.js` — `node test.js`: 91 checks of the rules, the clock, and the storage format.
 - `tune.js` — `node tune.js [years] [seeds]`: runs the garden for years under four starting conditions and reports what happens (extinctions, turnover, who dominates).
 - `browser-test.js` and `cdp.js` — `node browser-test.js`: drives the real page in a headless Chrome or Edge (36 checks: clicking, hover, persistence, the URL backup, the return replay, opening as a local file). Needs Node 22 or later and Chrome or Edge installed; no packages.
-- `BRIEF.md` — the original brief, verbatim.
-- `DESIGN.md` — the concept as written before building.
-- `RECORD.md` — what was decided, what changed, and how it was tested.
 
 Tested in Chrome on Windows (opened by double-click, and served over HTTP). Other browsers should work; they have not been checked.
