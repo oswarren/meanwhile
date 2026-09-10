@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meanwhile</title>
+<style>
+  :root { --paper: #efe9dc; --ink: #3a3630; --ink-soft: #7a736a; --line: #d9d1c2; }
+  html, body { margin: 0; background: var(--paper); color: var(--ink); }
+  body { font: 15px/1.45 Georgia, 'Iowan Old Style', Palatino, 'Times New Roman', serif; padding: 24px 16px 40px; }
+  main { max-width: 960px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 10px; flex-wrap: wrap; }
+  h1 { font-size: 20px; font-weight: normal; letter-spacing: 0.04em; margin: 0; }
+  #status { color: var(--ink-soft); font-size: 14px; }
+  #stage { position: relative; }
+  canvas { display: block; width: 100%; height: auto; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.12), 0 8px 24px rgba(60,40,20,0.10); cursor: crosshair; }
+  #caption { position: absolute; left: 0; right: 0; top: 46%; text-align: center; color: #fff; font-size: 22px; letter-spacing: 0.06em; text-shadow: 0 1px 3px rgba(0,0,0,0.6); pointer-events: none; opacity: 0; transition: opacity 0.6s; }
+  #caption.on { opacity: 1; }
+  #caption small { display: block; font-size: 13px; letter-spacing: 0.1em; opacity: 0.85; margin-top: 4px; }
+  #hover { min-height: 1.5em; margin: 10px 2px 4px; color: var(--ink-soft); font-size: 14px; font-style: italic; }
+  nav { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  nav button { font: inherit; font-size: 14px; background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 5px 10px; color: var(--ink); cursor: pointer; }
+  nav button:hover { border-color: var(--line); }
+  nav button.on { background: #fff8; border-color: var(--line); }
+  nav button i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+  nav button kbd { color: var(--ink-soft); font: inherit; font-size: 11px; margin-left: 5px; }
+  footer { margin-top: 26px; color: var(--ink-soft); font-size: 13.5px; border-top: 1px solid var(--line); padding-top: 12px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  footer p { margin: 0; }
+  #reset { font: inherit; font-size: 12.5px; color: var(--ink-soft); background: none; border: none; cursor: pointer; text-decoration: underline dotted; padding: 0; }
+  @media (max-width: 600px) { body { padding: 14px 12px 30px; } h1 { font-size: 18px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Meanwhile</h1>
+    <div id="status"></div>
+  </header>
+  <div id="stage">
+    <canvas id="garden" width="960" height="460"></canvas>
+    <div id="caption"></div>
+  </div>
+  <div id="hover"></div>
+  <nav id="tools"></nav>
+  <footer>
+    <p id="notes">Clover spreads. Oaks make shade, and shade falls forward. Ferns want shade. Poppies want sun. Stones stay. A garden day is half an hour, and nothing here needs you.</p>
+    <p><button id="reset">start over</button></p>
+  </footer>
+</main>
+<script src="sim.js"></script>
+<script>
+(function () {
+  'use strict';
+  const KEY = 'meanwhile.garden.v2';
+  const canvas = document.getElementById('garden');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const hoverEl = document.getElementById('hover');
+  const captionEl = document.getElementById('caption');
+  const toolsEl = document.getElementById('tools');
+  const resetEl = document.getElementById('reset');
+
+  // ---------------------------------------------------------------- state
+  const TOOLS = [
+    { id: 'clover', label: 'clover', dot: '#6da85a', hint: 'ground cover; spreads fast, lives a few weeks' },
+    { id: 'poppy',  label: 'poppy',  dot: '#d9472b', hint: 'flower; wants sun and room' },
+    { id: 'oak',    label: 'oak',    dot: '#4f7a3a', hint: 'tree; slow, and it makes shade' },
+    { id: 'fern',   label: 'fern',   dot: '#3f7f5f', hint: 'lives only in shade' },
+    { id: 'stone',  label: 'stone',  dot: '#8d877c', hint: 'stays until you pull it' },
+    { id: 'pull',   label: 'pull',   dot: '#c9b99a', hint: 'take something out' },
+  ];
+  let state = loadState();
+  let tool = 'clover';
+  let hover = -1;
+  let replay = null;
+  let shadeCache = { tick: -1, cells: null, map: null };
+  let resetArmed = 0;
+
+  function freshState() { return Sim.foundGarden(Date.now(), (Math.random() * 0x7fffffff) | 0); }
+  // The garden lives in this browser's storage and, as a backup, in the page's address.
+  // Whichever copy was saved most recently (in wall-clock terms) wins, so an old
+  // address cannot resurrect a garden you have since started over.
+  function loadState() {
+    const found = [];
+    try { const j = localStorage.getItem(KEY); if (j) found.push(Sim.load(j)); } catch (e) {}
+    try { const h = location.hash.slice(1); if (h) found.push(Sim.decode(decodeURIComponent(h))); } catch (e) {}
+    const at = s => s.epoch + s.tick * Sim.TICK_MS;
+    found.sort((a, b) => at(b) - at(a));
+    return found[0] || freshState();
+  }
+  // If the garden is open in another tab and that tab saves, follow it.
+  window.addEventListener('storage', e => {
+    if (e.key !== KEY || !e.newValue) return;
+    let s; try { s = Sim.load(e.newValue); } catch (err) { return; }
+    state = s; replay = null; hideCaption(); shadeCache.tick = -1; lastTick = state.tick; hover = -1; updateHover();
+  });
+  function saveState() {
+    try { localStorage.setItem(KEY, Sim.save(state)); } catch (e) {}
+    try { history.replaceState(null, '', '#' + Sim.encode(state)); } catch (e) {}
+  }
+  function shadeNow() {
+    if (shadeCache.tick !== state.tick || shadeCache.cells !== state.cells) {
+      shadeCache = { tick: state.tick, cells: state.cells, map: Sim.shadeMap(state.cells) };
+    }
+    return shadeCache.map;
+  }
+
+  // ---------------------------------------------------------------- tools
+  for (const t of TOOLS) {
+    const b = document.createElement('button');
+    b.innerHTML = `<i style="background:${t.dot}"></i>${t.label}<kbd>${TOOLS.indexOf(t) + 1}</kbd>`;
+    b.title = t.hint;
+    b.dataset.id = t.id;
+    b.addEventListener('click', () => selectTool(t.id));
+    toolsEl.appendChild(b);
+  }
+  function selectTool(id) {
+    tool = id;
+    for (const b of toolsEl.children) b.classList.toggle('on', b.dataset.id === id);
+    updateHover();
+  }
+  selectTool(tool);
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const n = parseInt(e.key, 10);
+    if (n >= 1 && n <= TOOLS.length) selectTool(TOOLS[n - 1].id);
+  });
+
+  resetEl.addEventListener('click', () => {
+    const now = performance.now();
+    if (resetArmed && now - resetArmed < 5000) {
+      state = freshState(); replay = null; saveState(); resetArmed = 0;
+      resetEl.textContent = 'start over'; hideCaption(); updateHover();
+    } else {
+      resetArmed = now; resetEl.textContent = 'really start over, with a different garden? click again';
+      setTimeout(() => { if (resetArmed === now) { resetArmed = 0; resetEl.textContent = 'start over'; } }, 5000);
+    }
+  });
+
+  // ---------------------------------------------------------------- geometry
+  const CW = 960, CH = 460, CELL = 68, HORIZON = 168;
+  const edgeY = e => HORIZON + e * 42;                                  // e = 0 (back) .. 6 (front)
+  const edgeS = e => 0.72 + 0.28 * (e / 6);
+  const edgeX = (e, col) => CW / 2 + (col - Sim.W / 2) * CELL * edgeS(e);
+  function plotAt(mx, my) {
+    if (my < edgeY(0) || my >= edgeY(6)) return -1;
+    const e = (my - HORIZON) / 42, r = Math.floor(e);
+    const col = Math.floor((mx - CW / 2) / (CELL * edgeS(e)) + Sim.W / 2);
+    if (col < 0 || col >= Sim.W || r < 0 || r >= Sim.H) return -1;
+    return r * Sim.W + col;
+  }
+  function plotQuad(i) {
+    const r = (i / Sim.W) | 0, c = i % Sim.W;
+    return [[edgeX(r, c), edgeY(r)], [edgeX(r, c + 1), edgeY(r)], [edgeX(r + 1, c + 1), edgeY(r + 1)], [edgeX(r + 1, c), edgeY(r + 1)]];
+  }
+  function fillQuad(q) { ctx.beginPath(); ctx.moveTo(q[0][0], q[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(q[k][0], q[k][1]); ctx.closePath(); ctx.fill(); }
+
+  // ---------------------------------------------------------------- colour
+  const SEASON_PAL = [ // keyframes at the middle of spring, summer, autumn, winter
+    { leaf: [126,187,99], dark: [86,143,69],  oak: [131,186,96],  lawn: [156,187,106], soil: [122,90,60], sky: [159,197,220], horizon: [223,233,236] },
+    { leaf: [95,157,75],  dark: [63,122,54],  oak: [79,139,61],   lawn: [135,169,90],  soil: [111,82,56], sky: [143,189,222], horizon: [226,236,238] },
+    { leaf: [138,154,72], dark: [108,124,58], oak: [196,128,44],  lawn: [166,163,92],  soil: [106,79,54], sky: [170,196,212], horizon: [232,230,220] },
+    { leaf: [109,127,99], dark: [79,96,73],   oak: [91,74,58],    lawn: [154,160,138], soil: [92,74,59],  sky: [190,203,212], horizon: [236,238,238] },
+  ];
+  const mixA = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const rgb = (a, al) => al == null ? `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})` : `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+  const TAN = [185, 165, 122], SEED = [92, 66, 40], STONE = [141, 135, 124], POPPY = [217, 71, 43], POPPY_DARK = [43, 26, 18], DEAD = [168, 146, 104];
+  function seasonPalette(doy) {
+    const p = ((doy - 45 + Sim.YEAR) % Sim.YEAR) / (Sim.YEAR / 4);
+    const i = Math.floor(p), f = p - i, A = SEASON_PAL[i % 4], B = SEASON_PAL[(i + 1) % 4], out = {};
+    for (const k in A) out[k] = mixA(A[k], B[k], f);
+    return out;
+  }
+  function daylight(h) { // 0 at night, 1 by day, with a two-hour dawn and dusk
+    let x = h < 5 || h >= 20 ? 0 : h < 7 ? (h - 5) / 2 : h < 18 ? 1 : 1 - (h - 18) / 2;
+    return x * x * (3 - 2 * x);
+  }
+  const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+  const stable = (i, j, salt) => Sim.rnd(1, i, j, salt); // fixed per-plot jitter, same every frame
+
+  // ---------------------------------------------------------------- scene
+  function render(now) {
+    const inf = Sim.info(state);
+    const ph = replay ? 0 : Sim.phase(state, now);
+    const hour = replay ? 12 : inf.hour + ph;     // a time-lapse is shown at noon; days flicking past would strobe
+    const L = daylight(hour);
+    const pal = seasonPalette(inf.dayOfYear);
+    const t = now / 1000;
+    const shade = shadeNow();
+
+    // sky
+    let sky = mixA([14,23,48], pal.sky, L), hor = mixA([35,47,77], pal.horizon, L);
+    hor = mixA(hor, [240,178,122], (1 - Math.abs(2 * L - 1)) * 0.6);
+    const skyG = ctx.createLinearGradient(0, 0, 0, HORIZON);
+    skyG.addColorStop(0, rgb(sky)); skyG.addColorStop(1, rgb(hor));
+    ctx.fillStyle = skyG; ctx.fillRect(0, 0, CW, HORIZON + 2);
+
+    // sun by day, moon by night
+    if (hour >= 6 && hour < 18) {
+      const a = (hour - 6) / 12, sx = CW * 0.12 + CW * 0.76 * a, sy = HORIZON - 14 - 120 * Math.sin(a * Math.PI);
+      const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 90);
+      glow.addColorStop(0, 'rgba(255,240,200,0.55)'); glow.addColorStop(1, 'rgba(255,240,200,0)');
+      ctx.fillStyle = glow; ctx.fillRect(sx - 90, sy - 90, 180, 180);
+      ctx.fillStyle = 'rgb(255,246,214)';
+      ctx.beginPath(); ctx.arc(sx, sy, 13, 0, Math.PI * 2); ctx.fill();
+    } else {
+      const mh = hour >= 18 ? hour - 18 : hour + 6, a = mh / 12;
+      const mx = CW * 0.88 - CW * 0.76 * a, my = HORIZON - 20 - 110 * Math.sin(a * Math.PI);
+      ctx.fillStyle = 'rgba(225,228,238,0.9)'; ctx.beginPath(); ctx.arc(mx, my, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgb(sky); ctx.beginPath(); ctx.arc(mx + 4, my - 2, 7, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // far hedge, lawn, bed
+    ctx.fillStyle = rgb(mixA(pal.dark, [40,60,40], 0.35));
+    ctx.fillRect(0, HORIZON - 10, CW, 14);
+    for (let k = -1; k < 32; k++) { ctx.beginPath(); ctx.arc(k * 32 + 10, HORIZON - 9, 13 + 4 * stable(k + 100, 0, 7), Math.PI, 0); ctx.fill(); }
+    ctx.fillStyle = rgb(pal.lawn); ctx.fillRect(0, HORIZON, CW, CH - HORIZON);
+    ctx.fillStyle = rgb(pal.soil);
+    ctx.beginPath(); ctx.moveTo(edgeX(0, 0), edgeY(0)); ctx.lineTo(edgeX(0, Sim.W), edgeY(0));
+    ctx.lineTo(edgeX(7, Sim.W), CH); ctx.lineTo(edgeX(7, 0), CH); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.13)'; ctx.lineWidth = 1;
+    for (let e = 1; e <= 6; e++) { ctx.beginPath(); ctx.moveTo(edgeX(e, 0), edgeY(e)); ctx.lineTo(edgeX(e, Sim.W), edgeY(e)); ctx.stroke(); }
+    // shade on the ground
+    for (let i = 0; i < Sim.N; i++) if (shade[i]) {
+      ctx.fillStyle = `rgba(20,25,40,${0.12 + 0.05 * Math.min(2, shade[i])})`;
+      fillQuad(plotQuad(i));
+    }
+    if (hover >= 0) {
+      ctx.fillStyle = 'rgba(255,245,220,0.22)'; ctx.strokeStyle = 'rgba(255,245,220,0.55)';
+      fillQuad(plotQuad(hover)); ctx.stroke();
+    }
+
+    // plants, back row first
+    for (let r = 0; r < Sim.H; r++) {
+      const s = edgeS(r + 0.75), y = edgeY(r + 1) - 7;
+      for (let c = 0; c < Sim.W; c++) {
+        const i = r * Sim.W + c, cell = state.cells[i];
+        if (!cell) continue;
+        const x = (edgeX(r + 1, c) + edgeX(r + 1, c + 1)) / 2;
+        drawCell(cell, i, x, y, s, t, pal, ph * inf.growth, inf);
+      }
+    }
+
+    // night
+    if (L < 1) { ctx.fillStyle = `rgba(12,18,44,${0.58 * (1 - L)})`; ctx.fillRect(0, HORIZON - 12, CW, CH - HORIZON + 12); }
+
+    const hh = String(inf.hour).padStart(2, '0');
+    statusEl.textContent = `${inf.part} ${inf.season} · ${hh}:00`;
+  }
+
+  function drawCell(cell, i, x, y, s, t, pal, extra, inf) {
+    if (cell.k === 'stone') return drawStone(i, x, y, s);
+    if (cell.k === 'dead') return drawDead(i, x, y, s, t);
+    const sp = Sim.SPECIES[cell.k];
+    const d = cell.d + extra * cell.j;
+    const age = state.tick - cell.b;
+    const wither = clamp01((age - sp.life * cell.j * 0.85) / (sp.life * cell.j * 0.15));
+    switch (cell.k) {
+      case 'clover': return drawClover(i, x, y, s, d, sp, wither, t, pal);
+      case 'poppy':  return drawPoppy(i, x, y, s, d, sp, wither, t, pal);
+      case 'oak':    return drawOak(i, x, y, s, d, sp, t, pal, inf);
+      case 'fern':   return drawFern(i, x, y, s, d, sp, wither, t, pal);
+    }
+  }
+  function seedDot(x, y, s) { ctx.fillStyle = rgb(SEED); ctx.beginPath(); ctx.ellipse(x, y - 1.5 * s, 2 * s, 1.4 * s, 0, 0, Math.PI * 2); ctx.fill(); }
+  function sproutPair(x, y, s, h, colour, sway) {
+    ctx.strokeStyle = rgb(colour); ctx.lineWidth = 1.2 * s; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + sway, y - h); ctx.stroke();
+    ctx.fillStyle = rgb(colour);
+    ctx.beginPath(); ctx.ellipse(x + sway - 2.2 * s, y - h + 0.5 * s, 2.6 * s, 1.3 * s, -0.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x + sway + 2.2 * s, y - h + 0.5 * s, 2.6 * s, 1.3 * s, 0.5, 0, Math.PI * 2); ctx.fill();
+  }
+  function drawDead(i, x, y, s, t) {
+    ctx.strokeStyle = rgb(DEAD); ctx.lineWidth = 1.1 * s; ctx.lineCap = 'round';
+    for (let j = 0; j < 3; j++) {
+      const ox = (stable(i, j, 13) - 0.5) * 16 * s, h = (5 + 6 * stable(i, j, 14)) * s, lean = (stable(i, j, 15) - 0.5) * 10 * s;
+      ctx.beginPath(); ctx.moveTo(x + ox, y); ctx.quadraticCurveTo(x + ox + lean * 0.3, y - h, x + ox + lean, y - h * 0.6); ctx.stroke();
+    }
+  }
+  function drawClover(i, x, y, s, d, sp, wither, t, pal) {
+    if (d < sp.sprout) return seedDot(x, y, s);
+    const k = clamp01(d / sp.mature);
+    const leaf = mixA(pal.leaf, TAN, wither), dark = mixA(pal.dark, TAN, wither);
+    if (k < 0.25) return sproutPair(x, y, s, (3 + 10 * k) * s, leaf, Math.sin(t * 1.3 + i) * 0.6 * s);
+    const n = 3 + Math.round(3 * k);
+    for (let j = 0; j < n; j++) {
+      const ox = (stable(i, j, 1) - 0.5) * 30 * s, h = (4 + 7 * k) * s * (0.7 + 0.6 * stable(i, j, 2));
+      const sway = Math.sin(t * 1.4 + i * 0.7 + j) * 0.8 * s;
+      ctx.strokeStyle = rgb(dark); ctx.lineWidth = 0.9 * s;
+      ctx.beginPath(); ctx.moveTo(x + ox, y); ctx.lineTo(x + ox + sway, y - h); ctx.stroke();
+      const rr = (1.5 + 1.7 * k) * s;
+      ctx.fillStyle = rgb(j % 2 ? leaf : dark);
+      for (let q = 0; q < 3; q++) { const a = -Math.PI / 2 + q * 2.09; ctx.beginPath(); ctx.arc(x + ox + sway + Math.cos(a) * rr * 0.8, y - h + Math.sin(a) * rr * 0.8, rr, 0, Math.PI * 2); ctx.fill(); }
+      if (k >= 1 && wither < 0.5 && stable(i, j, 3) < 0.45) { ctx.fillStyle = 'rgba(255,250,240,0.95)'; ctx.beginPath(); ctx.arc(x + ox + sway + 2 * s, y - h - 3 * s, 1.7 * s, 0, Math.PI * 2); ctx.fill(); }
+    }
+  }
+  function drawPoppy(i, x, y, s, d, sp, wither, t, pal) {
+    if (d < sp.sprout) return seedDot(x, y, s);
+    const k = clamp01(d / sp.mature);
+    const over = d >= sp.mature + sp.bloom || wither > 0.3;      // gone to seed
+    const dark = mixA(pal.dark, TAN, Math.max(wither, over ? 0.35 : 0));
+    if (k < 0.2) return sproutPair(x, y, s, (3 + 12 * k) * s, dark, Math.sin(t * 1.3 + i) * 0.6 * s);
+    const stems = 1 + Math.floor(2.2 * k);
+    for (let j = 0; j < stems; j++) {
+      const ox = (j === 0 ? 0 : (stable(i, j, 4) - 0.5) * 22) * s;
+      const h = (10 + 32 * k) * s * (j === 0 ? 1 : 0.75 + 0.3 * stable(i, j, 5));
+      const sway = Math.sin(t * 1.5 + i * 0.9 + j * 1.7) * 3 * s * k;
+      ctx.strokeStyle = rgb(dark); ctx.lineWidth = 1.2 * s; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x + ox, y); ctx.quadraticCurveTo(x + ox + sway * 0.4, y - h * 0.6, x + ox + sway, y - h); ctx.stroke();
+      ctx.fillStyle = rgb(dark);
+      ctx.beginPath(); ctx.ellipse(x + ox - 3 * s, y - h * 0.3, 3.5 * s, 1.3 * s, -0.6, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x + ox + 3 * s, y - h * 0.45, 3.5 * s, 1.3 * s, 0.6, 0, Math.PI * 2); ctx.fill();
+      const tx = x + ox + sway, ty = y - h;
+      if (over) { ctx.fillStyle = rgb(mixA([120,95,60], TAN, 0.4)); ctx.beginPath(); ctx.ellipse(tx, ty - 1.5 * s, 2.2 * s, 3 * s, 0, 0, Math.PI * 2); ctx.fill(); }
+      else if (k < 1) { if (k > 0.7) { ctx.fillStyle = rgb(dark); ctx.beginPath(); ctx.ellipse(tx, ty - 1.5 * s, 2 * s, 3.2 * s, sway * 0.05, 0, Math.PI * 2); ctx.fill(); } }
+      else {
+        const pr = 3.4 * s, petal = mixA(POPPY, [235,120,90], stable(i, j, 6) * 0.4);
+        ctx.fillStyle = rgb(petal);
+        for (let q = 0; q < 4; q++) { const a = q * Math.PI / 2 + t * 0.05; ctx.beginPath(); ctx.arc(tx + Math.cos(a) * pr * 0.75, ty - 2 * s + Math.sin(a) * pr * 0.75, pr, 0, Math.PI * 2); ctx.fill(); }
+        ctx.fillStyle = rgb(POPPY_DARK); ctx.beginPath(); ctx.arc(tx, ty - 2 * s, 1.6 * s, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+  function drawOak(i, x, y, s, d, sp, t, pal, inf) {
+    if (d < sp.sprout) { ctx.fillStyle = rgb([110,78,44]); ctx.beginPath(); ctx.ellipse(x, y - 2 * s, 2.4 * s, 3.2 * s, 0, 0, Math.PI * 2); ctx.fill(); return; }
+    const f = d < sp.mature ? 0.32 * (d / sp.mature) : 0.32 + 0.68 * clamp01((d - sp.mature) / (sp.old - sp.mature));
+    const leaf = pal.oak;
+    if (f < 0.06) return sproutPair(x, y, s, (4 + 60 * f) * s, leaf, Math.sin(t * 1.2 + i) * 0.5 * s);
+    const hT = (8 + 118 * f) * s, wT = (1.6 + 8 * f) * s;
+    const sway = Math.sin(t * 0.6 + i * 0.4) * 1.6 * s * f;
+    ctx.fillStyle = rgb([92,66,46]);
+    ctx.beginPath(); ctx.moveTo(x - wT, y); ctx.lineTo(x + wT, y); ctx.lineTo(x + wT * 0.55 + sway, y - hT); ctx.lineTo(x - wT * 0.55 + sway, y - hT); ctx.closePath(); ctx.fill();
+    const n = 3 + Math.floor(5 * f), R = (5 + 25 * f) * s, spread = 22 * f * s;
+    const winter = inf.season === 'winter' ? 0.28 : 1;
+    if (winter < 1) { // bare branches show through
+      ctx.strokeStyle = rgb([92,66,46]); ctx.lineWidth = Math.max(1, wT * 0.35);
+      for (let q = 0; q < 4; q++) { const a = -Math.PI / 2 + (q - 1.5) * 0.55; ctx.beginPath(); ctx.moveTo(x + sway, y - hT + 2); ctx.lineTo(x + sway + Math.cos(a) * R * 1.3, y - hT + Math.sin(a) * R * 1.3); ctx.stroke(); }
+    }
+    for (let j = 0; j < n; j++) {
+      const ox = (stable(i, j, 7) - 0.5) * 2 * spread, oy = -stable(i, j, 8) * spread * 0.8;
+      const rr = R * (0.65 + 0.5 * stable(i, j, 9));
+      ctx.fillStyle = rgb(mixA(leaf, [20,30,20], 0.35), winter);
+      ctx.beginPath(); ctx.arc(x + sway + ox, y - hT + oy + rr * 0.35, rr, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = rgb(mixA(leaf, [255,255,220], 0.12 * stable(i, j, 10)), winter);
+      ctx.beginPath(); ctx.arc(x + sway + ox, y - hT + oy, rr, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  function drawFern(i, x, y, s, d, sp, wither, t, pal) {
+    if (d < sp.sprout) { ctx.fillStyle = rgb([70,110,80]); ctx.beginPath(); ctx.arc(x, y - 1.5 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill(); return; }
+    const k = clamp01(d / sp.mature);
+    const colour = mixA([63,127,95], TAN, wither);
+    ctx.strokeStyle = rgb(colour); ctx.lineWidth = 1.7 * s; ctx.lineCap = 'round';
+    const n = 3 + Math.round(4 * k);
+    for (let j = 0; j < n; j++) {
+      const a = -Math.PI / 2 + (j / (n - 1) - 0.5) * 2.4, len = (7 + 17 * k) * s * (0.75 + 0.35 * stable(i, j, 11));
+      const sway = Math.sin(t * 1.1 + i * 0.5 + j) * 1.2 * s;
+      const tx = x + Math.cos(a) * len + sway, ty = y + Math.sin(a) * len;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(x + Math.cos(a) * len * 0.5, y + Math.sin(a) * len * 0.5 - 4 * s, tx, ty); ctx.stroke();
+      ctx.beginPath(); ctx.arc(tx, ty, 1.3 * s, 0, Math.PI * 2); ctx.fillStyle = rgb(colour); ctx.fill();
+    }
+  }
+  function drawStone(i, x, y, s) {
+    ctx.fillStyle = rgb(STONE); ctx.strokeStyle = rgb(mixA(STONE, [0,0,0], 0.35)); ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let q = 0; q < 7; q++) { const a = q / 7 * Math.PI * 2, rr = (8 + 6 * stable(i, q, 12)) * s; const px = x + Math.cos(a) * rr * 1.25, py = y - 5 * s + Math.sin(a) * rr * 0.7; q ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.beginPath(); ctx.ellipse(x - 3 * s, y - 9 * s, 4 * s, 2 * s, -0.4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // ---------------------------------------------------------------- interaction
+  function canvasPoint(ev) {
+    const r = canvas.getBoundingClientRect();
+    return [(ev.clientX - r.left) / r.width * CW, (ev.clientY - r.top) / r.height * CH];
+  }
+  canvas.addEventListener('mousemove', ev => { const [x, y] = canvasPoint(ev); hover = replay ? -1 : plotAt(x, y); updateHover(); });
+  canvas.addEventListener('mouseleave', () => { hover = -1; updateHover(); });
+  // On a phone there is no hover, so the first tap on a plot reads it and a second tap acts on it.
+  const touchOnly = !!(window.matchMedia && window.matchMedia('(hover: none)').matches);
+  canvas.addEventListener('click', ev => {
+    if (replay) { finishReplay(); return; }
+    const [x, y] = canvasPoint(ev); const i = plotAt(x, y);
+    if (i < 0) return;
+    if (touchOnly && hover !== i) { hover = i; updateHover(); return; }
+    const done = tool === 'pull' ? Sim.pull(state, i) : Sim.plant(state, i, tool);
+    if (done) { shadeCache.tick = -1; saveState(); }
+    hover = i; updateHover();
+  });
+  function updateHover() {
+    if (replay || hover < 0) { hoverEl.textContent = ''; return; }
+    const cell = state.cells[hover];
+    let text = Sim.describe(state, hover, shadeNow());
+    const plantable = !cell || cell.k === 'dead' || cell.k === 'clover';
+    const verb = touchOnly ? 'tap again' : 'click';
+    if (tool === 'pull') { if (cell) text += ` — ${verb} to pull`; }
+    else if (plantable) text += ` — ${verb} to plant ${tool === 'stone' ? 'a stone' : tool}` + (cell && cell.k === 'clover' ? ' over it' : '');
+    else text += ' — pull it first to plant here';
+    hoverEl.textContent = text;
+  }
+
+  // ---------------------------------------------------------------- time
+  function showCaption() {
+    captionEl.textContent = 'Meanwhile';
+    captionEl.classList.add('on');
+  }
+  function hideCaption() { captionEl.classList.remove('on'); }
+  function finishReplay() {
+    if (!replay) return;
+    Sim.advance(state, Date.now());
+    replay = null; hideCaption(); saveState(); updateHover();
+  }
+  let lastTick = state.tick;
+  function frame() {
+    const now = Date.now();
+    const pending = Sim.targetTick(state, now) - state.tick;
+    if (pending >= Sim.DAY && !replay) {
+      // missed time plays back as a short time-lapse, a few seconds at most; any click skips it
+      replay = { from: state.tick, total: pending, t0: performance.now(), dur: Math.min(6000, Math.max(2000, pending / Sim.DAY * 150)) };
+      hover = -1; showCaption(); updateHover();
+    }
+    if (replay) {
+      const el = performance.now() - replay.t0, x = Math.min(1, el / replay.dur);
+      const eased = x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+      const target = replay.from + Math.round(replay.total * eased);
+      Sim.advance(state, now, Math.max(0, target - state.tick));
+      if (state.tick >= replay.from + replay.total || Sim.targetTick(state, now) <= state.tick) finishReplay();
+    } else {
+      Sim.advance(state, now);
+    }
+    if (state.tick !== lastTick) { lastTick = state.tick; if (!replay) { saveState(); updateHover(); } }
+    render(now);
+    requestAnimationFrame(frame);
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) saveState(); });
+  window.addEventListener('pagehide', saveState);
+  saveState();
+  frame();
+})();
+</script>
+</body>
+</html>
