@@ -372,11 +372,12 @@
     const r = canvas.getBoundingClientRect();
     return [(ev.clientX - r.left) / r.width * CW, (ev.clientY - r.top) / r.height * CH];
   }
-  canvas.addEventListener('mousemove', ev => { const [x, y] = canvasPoint(ev); hover = replay ? -1 : plotAt(x, y); updateHover(); });
+  canvas.addEventListener('mousemove', ev => { if (byTouch) return; const [x, y] = canvasPoint(ev); hover = replay ? -1 : plotAt(x, y); updateHover(); });
   canvas.addEventListener('mouseleave', () => { hover = -1; updateHover(); });
   // A finger cannot hover, so a first tap on a plot reads it and a second tap acts on it. A mouse click acts at once.
+  // (browsers also synthesise mouse events for taps, so mouse moves are ignored while the pointer is a finger)
   let byTouch = false;
-  canvas.addEventListener('pointerdown', ev => { byTouch = ev.pointerType === 'touch'; });
+  for (const type of ['pointerdown', 'pointermove']) canvas.addEventListener(type, ev => { byTouch = ev.pointerType === 'touch'; });
   canvas.addEventListener('click', ev => {
     if (replay) { finishReplay(); return; }
     const [x, y] = canvasPoint(ev); const i = plotAt(x, y);
