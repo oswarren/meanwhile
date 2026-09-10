@@ -374,13 +374,14 @@
   }
   canvas.addEventListener('mousemove', ev => { const [x, y] = canvasPoint(ev); hover = replay ? -1 : plotAt(x, y); updateHover(); });
   canvas.addEventListener('mouseleave', () => { hover = -1; updateHover(); });
-  // On a phone there is no hover, so the first tap on a plot reads it and a second tap acts on it.
-  const touchOnly = !!(window.matchMedia && window.matchMedia('(hover: none)').matches);
+  // A finger cannot hover, so a first tap on a plot reads it and a second tap acts on it. A mouse click acts at once.
+  let byTouch = false;
+  canvas.addEventListener('pointerdown', ev => { byTouch = ev.pointerType === 'touch'; });
   canvas.addEventListener('click', ev => {
     if (replay) { finishReplay(); return; }
     const [x, y] = canvasPoint(ev); const i = plotAt(x, y);
     if (i < 0) return;
-    if (touchOnly && hover !== i) { hover = i; updateHover(); return; }
+    if (byTouch && hover !== i) { hover = i; updateHover(); return; }
     const done = tool === 'pull' ? Sim.pull(state, i) : Sim.plant(state, i, tool);
     if (done) { shadeCache.tick = -1; saveState(); }
     hover = i; updateHover();
@@ -390,7 +391,7 @@
     const cell = state.cells[hover];
     let text = Sim.describe(state, hover, shadeNow());
     const plantable = !cell || cell.k === 'dead' || cell.k === 'clover';
-    const verb = touchOnly ? 'tap again' : 'click';
+    const verb = byTouch ? 'tap again' : 'click';
     if (tool === 'pull') { if (cell) text += ` — ${verb} to pull`; }
     else if (plantable) text += ` — ${verb} to plant ${tool === 'stone' ? 'a stone' : tool}` + (cell && cell.k === 'clover' ? ' over it' : '');
     else text += ' — pull it first to plant here';
